@@ -2,6 +2,9 @@
 import os
 from pathlib import Path
 
+# ⚠️ Workaround OpenMP (FAISS sous Windows)
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -14,13 +17,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 # Clé OpenRouter
-OPENROUTER_API_KEY = os.getenv("OPENROUTEUR_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 if OPENROUTER_API_KEY is None:
-    raise ValueError("OPENROUTEUR_API_KEY n'est pas défini dans le .env")
+    raise ValueError("OPENROUTER_API_KEY n'est pas défini dans le .env")
 
 # Modèle OpenRouter (modifiable à un seul endroit)
-OPENROUTER_MODEL = "moonshotai/kimi-k2:free"
+OPENROUTER_MODEL = "deepseek/deepseek-chat-v3.1:free"
 
 # Index FAISS déjà construit
 INDEX_DIR = BASE_DIR / "data/processed/index"
