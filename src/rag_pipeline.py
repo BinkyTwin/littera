@@ -1,148 +1,138 @@
 # src/rag_pipeline.py
-
 import os
-import sys
 from pathlib import Path
-from typing import List, Dict
 
 from dotenv import load_dotenv
+from openai import OpenAI
 
-# Workaround OpenMP (comme dans test_search)
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings  # pour les embeddings uniquement
 
-# Charge le .env
+# ====== Chargement env & config ======
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
-from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+# Clé OpenRouter
+OPENROUTER_API_KEY = os.getenv("OPENROUTEUR_API_KEY")
 
-INDEX_DIR = BASE_DIR / "data" / "processed" / "index"
+if OPENROUTER_API_KEY is None:
+    raise ValueError("OPENROUTEUR_API_KEY n'est pas défini dans le .env")
+
+# Modèle OpenRouter (modifiable à un seul endroit)
+OPENROUTER_MODEL = "moonshotai/kimi-k2:free"
+
+# Index FAISS déjà construit
+INDEX_DIR = BASE_DIR / "data/processed/index"
 
 
-def load_vectorstore() -> FAISS:
-    """Charge l'index FAISS sauvegardé précédemment."""
-    embeddings = OpenAIEmbeddings()
+# ====== Initialisation clients ======
+
+# Client OpenRouter (LLM)
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
+
+# Embeddings OpenAI (pour FAISS) - nécessite OPENAI_API_KEY dans .env
+embeddings = OpenAIEmbeddings()
+
+
+def load_vectorstore():
+    """Charge l'index FAISS existant."""
     vectorstore = FAISS.load_local(
         str(INDEX_DIR),
         embeddings,
-        allow_dangerous_deserialization=True,
+        allow_dangerous_deserialization=True,  # pour FAISS sur disque
     )
     return vectorstore
 
 
-def retrieve_context(
-    query: str,
-    k: int = 4,
-) -> tuple[str, List[Dict]]:
-    """
-    1) Transforme la question en vecteur
-    2) Récupère les k chunks les plus proches
-    3) Construit une string 'contexte' + une liste de sources pour les citations
-    """
+# ====== Brique RAG ======
+
+def retrieve_relevant_docs(question: str, k: int = 4):
+    """Fait la recherche sémantique dans FAISS et renvoie les meilleurs chunks."""
     vectorstore = load_vectorstore()
-    docs = vectorstore.similarity_search(query, k=k)
+    docs = vectorstore.similarity_search(question, k=k)
+    return docs
 
-    # Construire le contexte brut pour le LLM
+
+def build_context_from_docs(docs):
+    """Construit un gros contexte texte à partir des docs récupérés."""
     context_parts = []
-    sources = []
-    for i, d in enumerate(docs, start=1):
-        meta = d.metadata or {}
-        source = meta.get("file_name", "unknown")
-        page = meta.get("page", meta.get("page_num", ""))
-        chunk_id = meta.get("chunk_id", i)
-
-        # Ce qui part dans le prompt
+    for i, doc in enumerate(docs):
+        meta = doc.metadata or {}
+        file_name = meta.get("file_name", "unknown")
+        page = meta.get("page", meta.get("page_num", "?"))
         context_parts.append(
-            f"[SOURCE {i}] (file={source}, page={page})\n{d.page_content}\n"
+            f"[Source {i+1} | {file_name} | page {page}]\n{doc.page_content}"
         )
 
-        # Ce qu'on garde pour les afficher après
-        sources.append(
-            {
-                "source_id": i,
-                "file_name": source,
-                "page": page,
-                "chunk_id": chunk_id,
-                "preview": d.page_content[:200].replace("\n", " "),
-            }
-        )
-
-    full_context = "\n\n".join(context_parts)
-    return full_context, sources
+    context = "\n\n".join(context_parts)
+    return context
 
 
-def call_llm(
-    question: str,
-    context: str,
-    model_name: str = "gpt-4o-mini",
-    language: str = "fr",
-) -> str:
+def call_llm_with_openrouter(question: str, context: str) -> str:
     """
-    Appelle le LLM avec un prompt RAG :
-    - contexte + question
-    - consigne : ne répondre que sur la base du contexte
+    Appelle le LLM via OpenRouter (moonshotai/kimi-k2:free) avec un prompt RAG.
     """
-    llm = ChatOpenAI(
-        model=model_name,
-        temperature=0.2,
+    # Tu peux personnaliser ces meta-infos pour le ranking openrouter
+    extra_headers = {
+        "HTTP-Referer": "https://litteria.local",  # par ex. nom du projet
+        "X-Title": "Litteria - Academic RAG",
+    }
+
+    system_prompt = (
+        "Tu es un assistant académique. "
+        "Tu dois répondre uniquement à partir des SOURCES fournies ci-dessous. "
+        "Si l'information n'est pas présente ou insuffisante, tu dois dire que tu ne sais pas.\n\n"
+        "Pour chaque idée importante, cite la source au format (auteur, année, page si disponible).\n"
+        "Ne fabrique pas de références."
     )
 
-    system_prompt = f"""
-Tu es un assistant académique qui aide à faire des revues de littérature.
-Tu dois répondre UNIQUEMENT en te basant sur le CONTEXTE fourni.
-Si le contexte ne contient pas assez d'information, tu le dis honnêtement.
+    user_content = (
+        f"Question de l'utilisateur :\n{question}\n\n"
+        f"SOURCES (extraits d'articles) :\n{context}\n\n"
+        "Réponds de manière structurée, en français, "
+        "et ajoute une section 'Références utilisées' à la fin."
+    )
 
-Règles :
-- réponds en {language}
-- cite explicitement les [SOURCE X] quand tu t'appuies sur un passage
-- ne fais PAS de référence à d'autres documents que ceux du contexte
-"""
+    completion = client.chat.completions.create(
+        extra_headers=extra_headers,
+        model=OPENROUTER_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+    )
 
-    user_prompt = f"""
-CONTEXTE :
-
-{context}
-
-QUESTION :
-{question}
-
-Réponds de manière structurée, en citant les sources entre crochets, par exemple : 
-"Selon [SOURCE 1] ...", "D'autres auteurs ([SOURCE 2], [SOURCE 3]) indiquent que ..."
-"""
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
-
-    response = llm.invoke(messages)
-    return response.content
+    return completion.choices[0].message.content
 
 
-def answer_question(question: str) -> None:
-    """Pipeline complet : retrieve → LLM → affichage."""
-    print(f"\n=== QUESTION ===\n{question}\n")
+def answer_question(question: str, k: int = 4) -> str:
+    """
+    Pipeline complet :
+    - retrieve depuis FAISS
+    - construire le contexte
+    - appeler le LLM
+    - renvoyer la réponse finale
+    """
+    docs = retrieve_relevant_docs(question, k=k)
 
-    context, sources = retrieve_context(question, k=4)
-    answer = call_llm(question, context)
+    if not docs:
+        return "Je n'ai trouvé aucune source pertinente pour répondre à cette question."
 
-    print("=== RÉPONSE (RAG) ===")
-    print(answer)
-    print("\n=== SOURCES UTILISÉES ===")
-    for s in sources:
-        print(
-            f"[SOURCE {s['source_id']}] {s['file_name']} (page {s['page']}) "
-            f"- preview: {s['preview']}..."
-        )
+    context = build_context_from_docs(docs)
+    answer = call_llm_with_openrouter(question, context)
+    return answer
 
+
+# ====== Test CLI ======
 
 if __name__ == "__main__":
-    # Permet de lancer depuis la ligne de commande :
-    # python src/rag_pipeline.py "ta question ici"
-    if len(sys.argv) < 2:
-        print("Usage: python src/rag_pipeline.py \"Votre question ici\"")
-        sys.exit(1)
-
-    question = " ".join(sys.argv[1:])
-    answer_question(question)
+    q = input("Pose ta question : ")
+    print("[QUESTION]", q)
+    print()
+    response = answer_question(q, k=4)
+    print("[RÉPONSE]\n")
+    print(response)
