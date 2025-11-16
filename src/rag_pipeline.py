@@ -112,22 +112,22 @@ def call_llm_with_openrouter(question: str, context: str) -> str:
     return completion.choices[0].message.content
 
 
-def answer_question(question: str, k: int = 4) -> str:
+def answer_question(question: str, k: int = 4):
     """
     Pipeline complet :
     - retrieve depuis FAISS
     - construire le contexte
     - appeler le LLM
-    - renvoyer la réponse finale
+    - renvoyer la réponse finale + les docs utilisés
     """
     docs = retrieve_relevant_docs(question, k=k)
 
     if not docs:
-        return "Je n'ai trouvé aucune source pertinente pour répondre à cette question."
+        return "Je n'ai trouvé aucune source pertinente pour répondre à cette question.", []
 
     context = build_context_from_docs(docs)
     answer = call_llm_with_openrouter(question, context)
-    return answer
+    return answer, docs
 
 
 # ====== Test CLI ======
@@ -136,6 +136,14 @@ if __name__ == "__main__":
     q = input("Pose ta question : ")
     print("[QUESTION]", q)
     print()
-    response = answer_question(q, k=4)
+    answer, docs = answer_question(q, k=4)
     print("[RÉPONSE]\n")
-    print(response)
+    print(answer)
+
+    print("\n[SOURCES UTILISÉES]")
+    for i, d in enumerate(docs):
+        meta = d.metadata or {}
+        file_name = meta.get("file_name", "unknown")
+        page = meta.get("page", meta.get("page_num", "?"))
+        print(f"- Source {i+1}: {file_name}, page {page}")
+
