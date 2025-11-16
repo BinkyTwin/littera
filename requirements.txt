@@ -1,0 +1,25 @@
+# --- Core Python Tools ---
+python-dotenv
+
+# --- Streamlit UI ---
+streamlit
+
+# --- LangChain stack ---
+langchain
+langchain-community
+langchain-openai
+langchain-text-splitters
+
+# --- Embeddings + Vector DB ---
+faiss-cpu
+tiktoken
+
+# --- OpenAI / OpenRouter client ---
+openai
+
+# --- PDF parsing ---
+PyMuPDF
+
+# --- Utilities ---
+requests
+numpy
